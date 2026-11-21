@@ -37,6 +37,17 @@ Initial 1.7.10 release of Microphone Text Input, maintained on the
 
 ### Fixed
 
+- **"Speech model load failed" on GTNH 2.9.0.** RetroFuturaBootstrap
+  (lwjgl3ify) rewrites `Field.set` calls into its `UnsafeReflectionRedirector`,
+  which cannot access JNA's internal `Structure$FFIType` class. Vosk and JNA
+  are now loaded in an isolated child-first class loader that RFB does not
+  transform, so the model loads correctly. This also isolates the bundled JNA
+  from JNA copies shipped by other mods.
+- `language=auto` now follows the language selected in Minecraft instead of the
+  JVM locale. GTNH forces `user.language=en`, so a Chinese client previously
+  loaded the English model.
 - Long chat messages no longer exceed the server-side 1.7.10 length limit.
 - The mod no longer crashes a dedicated server: the `@Mod` class is side
   neutral and all client code is initialised only on the physical client.
+- JNA updated from 5.7.0 (pulled in by Vosk) to 5.19.1, which is compatible
+  with Java 17-25.

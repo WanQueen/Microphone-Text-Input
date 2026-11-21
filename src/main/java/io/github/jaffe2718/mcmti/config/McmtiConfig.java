@@ -2,7 +2,6 @@ package io.github.jaffe2718.mcmti.config;
 
 import java.io.File;
 import java.nio.charset.Charset;
-import java.util.Locale;
 
 import net.minecraftforge.common.config.Configuration;
 import net.minecraftforge.common.config.Property;
@@ -50,7 +49,7 @@ public final class McmtiConfig {
         }
     }
 
-    /** Language used for recognition. {@code auto} follows the system locale. */
+    /** Language used for recognition. {@code auto} follows the game language. */
     public enum Language {
         AUTO("auto"),
         CHINESE("zh"),
@@ -234,21 +233,6 @@ public final class McmtiConfig {
                 .getParentFile();
         }
         return new File("config");
-    }
-
-    /** Resolve the effective two letter recognition language code. */
-    public static String resolvedLanguageCode() {
-        switch (language) {
-            case CHINESE:
-                return "zh";
-            case ENGLISH:
-                return "en";
-            case AUTO:
-            default:
-                String systemLanguage = Locale.getDefault()
-                    .getLanguage();
-                return "zh".equalsIgnoreCase(systemLanguage) ? "zh" : "en";
-        }
     }
 
     public static Configuration getConfiguration() {

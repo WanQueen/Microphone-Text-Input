@@ -17,9 +17,12 @@ Linux (x86-64) and macOS.
 ## JNA (Java Native Access)
 
 - Project: <https://github.com/java-native-access/jna>
-- Artifact: `net.java.dev.jna:jna:5.7.0` (transitive dependency of Vosk)
+- Artifact: `net.java.dev.jna:jna:5.19.1`
 - License: Apache License 2.0 or LGPL 2.1 (dual licensed)
 - Copyright: Timothy Wall and contributors
+
+JNA is loaded together with Vosk in an isolated class loader so that
+RetroFuturaBootstrap (GTNH / lwjgl3ify) cannot break its internal reflection.
 
 ## Vosk speech models
 

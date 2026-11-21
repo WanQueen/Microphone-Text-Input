@@ -3,11 +3,9 @@ package io.github.jaffe2718.mcmti.util.vosk;
 import java.io.File;
 import java.io.IOException;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.I18n;
 import net.minecraft.util.ResourceLocation;
-
-import org.vosk.Model;
-import org.vosk.Recognizer;
 
 import io.github.jaffe2718.mcmti.MicrophoneTextInput;
 import io.github.jaffe2718.mcmti.config.McmtiConfig;
@@ -16,13 +14,13 @@ import io.github.jaffe2718.mcmti.util.SpeechRecognizer;
 /**
  * The bundled Vosk speech recognizer.
  * <p>
- * It uses the model that matches {@link McmtiConfig#resolvedLanguageCode()},
- * both models ship inside the mod jar and are extracted on first use.
+ * Vosk itself runs in an isolated class loader (see {@link VoskEngineLoader}),
+ * because JNA's reflective field access is broken by RetroFuturaBootstrap on
+ * GTNH. This class only talks to the {@link VoskEngine} interface.
  */
 public class VoskSpeechRecognizer extends SpeechRecognizer {
 
-    private volatile Model model;
-    private volatile Recognizer recognizer;
+    private volatile VoskEngine engine;
     private volatile String languageCode = "en";
 
     public VoskSpeechRecognizer(ResourceLocation id) {
@@ -46,30 +44,29 @@ public class VoskSpeechRecognizer extends SpeechRecognizer {
 
     @Override
     public boolean available() {
-        return super.available() && this.model != null && this.recognizer != null;
+        return super.available() && this.engine != null;
     }
 
     @Override
     protected void activate() throws IOException {
         this.deactivate();
-        String language = McmtiConfig.resolvedLanguageCode();
+        String language = resolveLanguage();
         MicrophoneTextInput.LOGGER.info("Loading Vosk model for language '{}'", language);
         File directory = VoskModelManager.ensureModel(language);
-        Model newModel = null;
-        Recognizer newRecognizer = null;
+        VoskEngine newEngine = null;
         try {
-            newModel = new Model(directory.getAbsolutePath());
-            newRecognizer = new Recognizer(newModel, 16000.0F);
-            newRecognizer.setWords(false);
+            newEngine = VoskEngineLoader.create();
+            newEngine.open(directory.getAbsolutePath(), language);
         } catch (Throwable t) {
-            closeQuietly(newRecognizer, newModel);
+            if (newEngine != null) {
+                newEngine.close();
+            }
             if (t instanceof IOException) {
                 throw (IOException) t;
             }
             throw new IOException("Failed to load the Vosk model from " + directory, t);
         }
-        this.model = newModel;
-        this.recognizer = newRecognizer;
+        this.engine = newEngine;
         this.languageCode = language;
         MicrophoneTextInput.LOGGER.info("Vosk model loaded from {}", directory.getAbsolutePath());
         super.activate();
@@ -77,62 +74,69 @@ public class VoskSpeechRecognizer extends SpeechRecognizer {
 
     @Override
     protected void deactivate() {
-        Recognizer oldRecognizer = this.recognizer;
-        Model oldModel = this.model;
-        this.recognizer = null;
-        this.model = null;
-        closeQuietly(oldRecognizer, oldModel);
+        VoskEngine oldEngine = this.engine;
+        this.engine = null;
+        if (oldEngine != null) {
+            try {
+                oldEngine.close();
+            } catch (Throwable ignored) {
+                // ignore
+            }
+        }
         super.deactivate();
     }
 
-
     @Override
     public String transcribe(float[] audio) {
-        Recognizer current = this.recognizer;
+        VoskEngine current = this.engine;
         if (current == null || audio == null || audio.length == 0) {
             return "";
         }
-        byte[] pcm = toPcm16(audio);
         try {
-            current.acceptWaveForm(pcm, pcm.length);
-            String json = current.getFinalResult();
-            String text = JsonText.extractText(json);
-            current.reset();
-            if ("zh".equals(this.languageCode)) {
-                text = text.replaceAll("\\s+", "");
-            }
-            return text == null ? "" : text.trim();
+            String text = current.transcribe(audio);
+            return text == null ? "" : text;
         } catch (Throwable t) {
             MicrophoneTextInput.LOGGER.error("Vosk transcription failed", t);
             return "";
         }
     }
 
-    private static byte[] toPcm16(float[] audio) {
-        byte[] pcm = new byte[audio.length * 2];
-        for (int i = 0; i < audio.length; i++) {
-            float sample = Math.max(-1.0F, Math.min(1.0F, audio[i]));
-            int value = Math.round(sample * 32767.0F);
-            pcm[i * 2] = (byte) (value & 0xFF);
-            pcm[i * 2 + 1] = (byte) ((value >> 8) & 0xFF);
-        }
-        return pcm;
+    public String getLanguageCode() {
+        return this.languageCode;
     }
 
-    private static void closeQuietly(Recognizer recognizer, Model model) {
-        if (recognizer != null) {
-            try {
-                recognizer.close();
-            } catch (Throwable ignored) {
-                // ignore
-            }
+    /**
+     * Resolve the language used for recognition. The language selected in the
+     * Minecraft options wins over the JVM locale, because GTNH and many
+     * launchers force user.language=en even on a Chinese system.
+     */
+    private static String resolveLanguage() {
+        switch (McmtiConfig.language) {
+            case CHINESE:
+                return "zh";
+            case ENGLISH:
+                return "en";
+            case AUTO:
+            default:
+                break;
         }
-        if (model != null) {
-            try {
-                model.close();
-            } catch (Throwable ignored) {
-                // ignore
+        try {
+            String gameLanguage = Minecraft.getMinecraft()
+                .getLanguageManager()
+                .getCurrentLanguage()
+                .getLanguageCode();
+            if (gameLanguage != null) {
+                String lower = gameLanguage.toLowerCase(java.util.Locale.ROOT);
+                if (lower.startsWith("zh")) {
+                    return "zh";
+                }
+                if (lower.startsWith("en")) {
+                    return "en";
+                }
             }
+        } catch (Throwable ignored) {
+            // not on the client thread yet, fall back to the JVM locale
         }
+        return "zh".equalsIgnoreCase(java.util.Locale.getDefault().getLanguage()) ? "zh" : "en";
     }
 }

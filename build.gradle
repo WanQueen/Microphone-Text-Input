@@ -8,12 +8,18 @@ ext.modVersion = '3.1.0'
 version = modVersion
 
 dependencies {
-    // Vosk speech recognition (Java 8 compatible) and its JNA dependency are
-    // bundled into the published mod jar, so players do not have to install
-    // anything besides the jar itself.
+    // Vosk speech recognition (Java 8 compatible). Its native library and the
+    // JNA runtime are bundled into the published mod jar, so players do not
+    // have to install anything besides the jar itself.
     shadowImplementation('com.alphacephei:vosk:0.3.45') {
-        transitive = true
+        // JNA 5.7 (the version Vosk asks for) uses reflection in a way that
+        // RetroFuturaBootstrap (GTNH / lwjgl3ify) rejects on Java 17+:
+        //   IllegalAccessException: ... UnsafeReflectionRedirector cannot
+        //   access a member of class com.sun.jna.Structure$FFIType
+        // A current JNA release handles the Java 17+ module rules correctly.
+        exclude group: 'net.java.dev.jna', module: 'jna'
     }
+    shadowImplementation 'net.java.dev.jna:jna:5.19.1'
 }
 
 jar {
@@ -24,4 +30,3 @@ jar {
         )
     }
 }
-

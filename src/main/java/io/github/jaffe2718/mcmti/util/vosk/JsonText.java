@@ -7,11 +7,11 @@ package io.github.jaffe2718.mcmti.util.vosk;
  * Parsing those by hand avoids depending on whichever Gson version the
  * Minecraft installation happens to ship.
  */
-final class JsonText {
+public final class JsonText {
 
     private JsonText() {}
 
-    static String extractText(String json) {
+    public static String extractText(String json) {
         if (json == null) {
             return "";
         }
