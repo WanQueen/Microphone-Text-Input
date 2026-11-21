@@ -40,11 +40,26 @@ public final class VoskEngineLoader {
     public static synchronized VoskEngine create() throws Exception {
         if (loader == null) {
             loader = new ChildFirstClassLoader(collectUrls(), VoskEngine.class.getClassLoader());
-            MicrophoneTextInput.LOGGER.info("Created isolated Vosk class loader with {} URL(s), first={}", loader.getURLs().length, loader.getURLs().length > 0 ? loader.getURLs()[0] : "none");
+            MicrophoneTextInput.LOGGER.info(
+                "Created isolated Vosk class loader with {} URL(s), first={}",
+                loader.getURLs().length,
+                loader.getURLs().length > 0 ? loader.getURLs()[0] : "none");
         }
-        Class<?> engineClass = Class.forName(ENGINE_CLASS, true, loader);
-        return (VoskEngine) engineClass.getDeclaredConstructor()
-            .newInstance();
+        // Make sure JNA (which is initialised together with the engine class)
+        // decodes the UTF-8 strings returned by Vosk correctly.
+        String previousEncoding = System.getProperty("jna.encoding");
+        System.setProperty("jna.encoding", "UTF-8");
+        try {
+            Class<?> engineClass = Class.forName(ENGINE_CLASS, true, loader);
+            return (VoskEngine) engineClass.getDeclaredConstructor()
+                .newInstance();
+        } finally {
+            if (previousEncoding == null) {
+                System.clearProperty("jna.encoding");
+            } else {
+                System.setProperty("jna.encoding", previousEncoding);
+            }
+        }
     }
 
     private static URL[] collectUrls() {

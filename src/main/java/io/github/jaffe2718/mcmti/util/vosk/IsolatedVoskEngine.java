@@ -17,9 +17,23 @@ public final class IsolatedVoskEngine implements VoskEngine {
     @Override
     public void open(String modelDirectory, String languageCode) throws Exception {
         close();
-        this.model = new Model(modelDirectory);
-        this.recognizer = new Recognizer(this.model, 16000.0F);
-        this.recognizer.setWords(false);
+        // Vosk returns UTF-8 JSON. JNA converts the native char* to String
+        // with the platform encoding (GBK on Chinese Windows), which turns
+        // Chinese results into mojibake. JNA reads the encoding once when its
+        // Native class is initialised, so temporarily force UTF-8 here.
+        String previousEncoding = System.getProperty("jna.encoding");
+        System.setProperty("jna.encoding", "UTF-8");
+        try {
+            this.model = new Model(modelDirectory);
+            this.recognizer = new Recognizer(this.model, 16000.0F);
+            this.recognizer.setWords(false);
+        } finally {
+            if (previousEncoding == null) {
+                System.clearProperty("jna.encoding");
+            } else {
+                System.setProperty("jna.encoding", previousEncoding);
+            }
+        }
         this.chinese = "zh".equalsIgnoreCase(languageCode);
     }
 

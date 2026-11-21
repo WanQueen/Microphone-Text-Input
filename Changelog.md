@@ -51,3 +51,8 @@ Initial 1.7.10 release of Microphone Text Input, maintained on the
   neutral and all client code is initialised only on the physical client.
 - JNA updated from 5.7.0 (pulled in by Vosk) to 5.19.1, which is compatible
   with Java 17-25.
+- **Chinese recognition results were mojibake** (for example `娴嬭瘯` instead of
+  `测试`). JNA decodes the UTF-8 strings returned by Vosk with the platform
+  encoding (GBK on Chinese Windows). The mod now forces `jna.encoding=UTF-8`
+  while the isolated JNA copy is initialised, so Chinese text arrives in chat
+  correctly.
