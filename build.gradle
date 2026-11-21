@@ -1,70 +1,27 @@
 plugins {
-    id 'com.modrinth.minotaur' version '2.+' apply false
-    id "architectury-plugin" version "3.5-SNAPSHOT"
-    id "dev.architectury.loom-no-remap" version "1.14-SNAPSHOT" apply false
-    id 'com.gradleup.shadow' version '8.3.6' apply false
+    id 'com.gtnewhorizons.gtnhconvention'
 }
 
-architectury {
-    minecraft = project.minecraft_version
-}
+// Explicit version: the mod is a port of the 3.x branch, and this repository
+// may not have a 1.7.10 git tag yet.
+ext.modVersion = '3.1.0'
+version = modVersion
 
-allprojects {
-    group = rootProject.maven_group
-    version = rootProject.mod_version
-}
-
-project.ext.publish_changelog = {
-    if (project.file('Changelog.md').exists()) {
-        println('Found Changelog.md')
-        return project.file('Changelog.md').text
-    } else {
-        println('Changelog.md not found, skipping changelog upload')
-        return ''
-    }
-}()
-
-ext.getPublishVersionType = {
-    if (project.mod_version.contains("alpha")) {
-        return 'alpha'
-    } else if (project.mod_version.contains("rc") || project.mod_version.contains("beta")) {
-        return 'beta'
-    } else {
-        return 'release'
+dependencies {
+    // Vosk speech recognition (Java 8 compatible) and its JNA dependency are
+    // bundled into the published mod jar, so players do not have to install
+    // anything besides the jar itself.
+    shadowImplementation('com.alphacephei:vosk:0.3.45') {
+        transitive = true
     }
 }
 
-subprojects {
-    apply plugin: "dev.architectury.loom-no-remap"
-    apply plugin: 'architectury-plugin'
-    apply plugin: 'maven-publish'
-
-    base {
-        // Set up a suffixed format for the mod jar names, e.g. `example-fabric`.
-        archivesName = "$rootProject.archives_name-$project.name"
-    }
-
-    repositories {
-        mavenLocal()
-        maven {
-            url = "https://api.modrinth.com/maven"
-        }
-    }
-
-    dependencies {
-        compileOnly 'org.jetbrains:annotations:26.1.0'
-        implementation "io.github.jaffe2718:whisper-jni:$rootProject.whisper_jni_version"   // install it to mavenLocal() before build
-        minecraft "com.mojang:minecraft:$rootProject.minecraft_version"
-    }
-
-    java {
-        withSourcesJar()
-
-        sourceCompatibility = JavaVersion.VERSION_25
-        targetCompatibility = JavaVersion.VERSION_25
-    }
-
-    tasks.withType(JavaCompile).configureEach {
-        it.options.release = 25
+jar {
+    manifest {
+        attributes(
+            'Implementation-Title': 'Microphone Text Input',
+            'Implementation-Version': project.version
+        )
     }
 }
+

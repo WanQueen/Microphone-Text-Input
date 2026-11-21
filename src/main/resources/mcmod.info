@@ -1,0 +1,17 @@
+[
+  {
+    "modid": "mcmti",
+    "name": "Microphone Text Input",
+    "description": "Speech recognition input for Minecraft chat. Records your microphone with a keybinding (default: V) and turns the speech into chat text or a draft message. Speech recognition is powered by Vosk and the Chinese and English models are bundled with the mod, so no extra download or configuration is needed.",
+    "version": "${modVersion}",
+    "mcversion": "${minecraftVersion}",
+    "url": "https://github.com/Jaffe2718/Microphone-Text-Input",
+    "updateUrl": "",
+    "authorList": ["Jaffe2718"],
+    "credits": "Speech recognition powered by Vosk (Alpha Cephei Inc.).",
+    "logoFile": "/assets/mcmti/icon.png",
+    "screenshots": [],
+    "parent": "",
+    "dependencies": []
+  }
+]

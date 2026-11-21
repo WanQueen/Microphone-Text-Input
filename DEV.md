@@ -1,603 +1,220 @@
-# Development Documentation
+# Development Documentation (1.7.10 / GTNH edition)
 
-## Introduction
-Since version 3.0.0, the Microphone Text Input (`mcmti`) mod has been redesigned to support custom ASR (Automatic Speech Recognition) extensions. This modular architecture allows developers to create their own speech recognition implementations that integrate seamlessly with the mod's core functionality.
+This document describes the architecture of the 1.7.10 port, how to build it
+and how other mods can plug their own speech recognizer into it.
 
-`mcmti` provides a unified interface for voice-to-text input in Minecraft, enabling players to use voice commands and dictation without typing. The mod handles microphone input, audio processing, and text input into Minecraft's chat and other input fields.
+## Project layout
 
-Key features of `mcmti` include:
-
-- Modular ASR system with support for custom extensions
-- Real-time speech recognition
-- Configurable input settings
-- Support for multiple languages (depending on the ASR implementation)
-- Integration with Minecraft's native input system
-- User-friendly configuration interface
-
-This documentation provides guidelines for developers who want to create custom ASR extensions for `mcmti`, as well as information on how to integrate the mod into their own projects.
-
-## Configuration
-
-```groovy
-// build.gradle
-
-repositories {
-    // ...
-    maven {
-        url = "https://api.modrinth.com/maven"
-    }
-}
-
-dependencies {
-    modImplementation "maven.modrinth:mcmti:${project.mcmti_3_x}"  // check your version at https://modrinth.com/mod/mcmti/versions
-    // ...
-}
+```
+mcmti/
+├── build.gradle              GTNHGradle build script (shadows Vosk + JNA)
+├── gradle.properties         GTNH build script properties
+├── settings.gradle           GTNH settings plugin
+├── src/main/java/io/github/jaffe2718/mcmti/
+�?  ├── MicrophoneTextInput.java        @Mod entry point (side neutral)
+�?  ├── client/
+�?  �?  ├── ClientProxy.java            keybinding, tick handler, ASR bootstrap
+�?  �?  ├── ClientEventHandler.java     recording state machine, chat delivery
+�?  �?  └── gui/
+�?  �?      ├── McmtiGuiFactory.java    Forge mod-list config button
+�?  �?      └── GuiMcmtiConfig.java     in-game config screen
+�?  ├── config/McmtiConfig.java         Forge Configuration wrapper
+�?  └── util/
+�?      ├── AudioRecorder.java          16 kHz mono PCM capture
+�?      ├── KeyState.java               physical key polling
+�?      ├── SpeechRecognizer.java       recognizer registry / lifecycle
+�?      └── vosk/
+�?          ├── VoskSpeechRecognizer.java
+�?          ├── VoskModelManager.java   model extraction from the jar
+�?          └── JsonText.java           tiny JSON "text" field parser
+└── src/main/resources/
+    ├── mcmod.info
+    └── assets/mcmti/
+        ├── icon.png
+        ├── lang/{en_US,zh_CN}.lang
+        └── models/*.zip                 bundled Vosk models
 ```
 
-## ASR Extension Development
+## Build
 
-You can create another mod that support other ASR APIs based on `mcmti`
+Requirements:
 
-### 1. Implement your custom SpeechRecognizer class
-In your project, you should implement your custom [SpeechRecognizer](common/src/main/java/io/github/jaffe2718/mcmti/util/SpeechRecognizer.java)
-to manage the lifecycle of speech recognizers, including initialization, activation, speech recognition, and deactivation.
+- JDK 17 or newer to run Gradle (JDK 8 is still used as the compile target; it
+  can be auto-provisioned by Gradle).
+- Network access for the first build only.
+
+```shell
+./gradlew build        # jar in build/libs/mcmti-3.1.0.jar
+./gradlew runClient    # development client
+```
+
+The build uses [GTNHGradle](https://github.com/GTNewHorizons/GTNHGradle)
+(`com.gtnewhorizons.gtnhconvention`) and RetroFuturaGradle. `gradle.properties`
+sets `usesShadowedDependencies = true`; the dependency declared as
+`shadowImplementation('com.alphacephei:vosk:0.3.45')` (and its transitive JNA
+dependency) is therefore packaged inside the final jar, including the native
+`libvosk` binaries for Windows, Linux and macOS.
+
+`gradle.properties` also sets `enableModernJavaSyntax = false`, so the code is
+compiled as Java 8 source/bytecode. Do not use Java 9+ APIs (no `var`, no
+`List.of`, no `Thread.ofVirtual`, ...) �?the mod must keep running on Java 8.
+
+## Runtime architecture
+
+```
+Client tick (ClientEventHandler)
+   �? key held / cycle timer
+   �?RECORD_EXECUTOR  ── AudioRecorder.recordUntilReleased() / recordCycle()
+   �? float[] samples (16 kHz, mono, -1..1)
+   �?ASR_EXECUTOR     ── SpeechRecognizer.recognize(samples)
+   �?                    └─ VoskSpeechRecognizer.transcribe()
+   �?Minecraft.func_152344_a(...)  (back to the client thread)
+   └─ send chat message or open GuiChat with the recognized text
+```
+
+- Recording and recognition each have their own single-threaded daemon
+  executor. The Vosk `Recognizer` is not thread-safe, so all calls into it are
+  serialized on `ASR_EXECUTOR`.
+- The microphone is opened once during `ClientProxy.init()`. If no compatible
+  device exists the mod logs the error and simply stays inactive.
+- `SpeechRecognizer` keeps a priority-sorted registry (`TreeMap`). The first
+  enabled recognizer is activated; the others are deactivated to save memory.
+- Models are extracted lazily on the ASR thread, so starting the game is not
+  blocked by the extraction.
+
+## Bundled model handling
+
+`VoskModelManager` looks for the model of the configured language:
+
+1. `config/mcmti.cfg` �?`modelPath`, if it points to a valid Vosk model
+   directory (contains `conf/model.conf` and `am/final.mdl`), is used as is.
+2. Otherwise the bundled zip
+   `assets/mcmti/models/vosk-model-small-{cn-0.22,en-us-0.15}.zip` is extracted
+   to `config/mcmti/models/<model name>/`.
+3. A `.mcmti-model` marker file is written after a successful extraction.
+   Directories without the marker are treated as incomplete and re-extracted,
+   which makes interrupted extractions self-healing.
+
+The archives are read with `java.util.zip.ZipInputStream`; the entry prefix
+(the top-level folder inside the zip) is stripped while extracting.
+
+## Adding a custom speech recognizer
+
+Subclass `io.github.jaffe2718.mcmti.util.SpeechRecognizer`:
 
 ```java
-public class MySpeechRecognizer extends SpeechRecognizer {
-    
-    // private MyASR ctx = ...;
-    
+public final class MyRecognizer extends SpeechRecognizer {
+
+    private MyEngine engine;
+
+    public MyRecognizer(ResourceLocation id) {
+        super(id);
+    }
+
     @Override
     public boolean enabled() {
-        // depends on your config or other logic, only the first enabled instance will be used
+        // Only the first enabled recognizer (lowest priority) is used.
+        return true;
     }
 
     @Override
-    protected @NotNull Text availableToast() {
-        // show a toast message when the recognizer is available
-        return Text.literal("My SpeechRecognizer is available");
+    protected String availableToast() {
+        return "My engine is ready";
     }
 
     @Override
-    protected @NotNull Text unavailableToast() {
-        // show a toast message when the recognizer is enabled but not available
-        return Text.literal("My SpeechRecognizer is enabled but not available");
+    protected String unavailableToast() {
+        return "My engine is not ready";
     }
-    
+
     @Override
-    protected boolean available() {
-        // check if the model is loaded and available
-        return super.available(); // && this.ctx != null && otherConditions
+    public boolean available() {
+        return super.available() && this.engine != null;
     }
-    
+
     @Override
-    public void activate() throws IOException {
-        // load the model
-        // ...
-        super.activate();  // remember to call super.activate() to set the active flag to true
+    protected void activate() throws IOException {
+        this.deactivate();
+        this.engine = new MyEngine();      // load your model here
+        super.activate();                  // sets the active flag
     }
-    
+
     @Override
-    public void deactivate() {
-        // release the model to save memory
-        // ...
-        super.deactivate();  // remember to call super.deactivate() to set the active flag to false
+    protected void deactivate() {
+        if (this.engine != null) {
+            this.engine.close();
+            this.engine = null;
+        }
+        super.deactivate();
     }
-    
+
     @Override
     public String transcribe(float[] audio) {
-        // use the model to recognize the audio
-        // result = ...
-        return result;
+        // audio: 16 kHz, mono, samples in [-1, 1]
+        return this.engine == null ? "" : this.engine.transcribe(audio);
     }
 }
 ```
 
-### 2. Register your custom SpeechRecognizer
-
-- Fabric version
-```java
-
-// register your custom SpeechRecognizer in the client side
-public class MyModClient implements ClientModInitializer {
-    
-    public static final String MOD_ID = "my_mod";
-    
-    @Override
-    public void onInitializeClient() {
-        // register your custom SpeechRecognizer
-        int priority = 1;  // smaller value means higher priority
-        SpeechRecognizer.register(priority, Identifier.of(MOD_ID, "my_recognizer"), MySpeechRecognizer::new);
-        // ...
-    }
-}
-```
-
-- NeoForge version
-```java
-@Mod(MyModNeoForge.MOD_ID)
-public final class MyModNeoForge {
-    
-    public static final String MOD_ID = "my_mod";
-    
-    public MyModNeoForge(@NotNull IEventBus modBus, @NotNull ModContainer container) {
-        // register your custom SpeechRecognizer
-        int priority = 1;  // smaller value means higher priority
-        SpeechRecognizer.register(priority, Identifier.of(MOD_ID, "my_recognizer"), MySpeechRecognizer::new);
-       
-        // if you are using NeoForge native config, you have to register after the config is loaded and before the client initialized completed
-        container.registerConfig(ModConfig.Type.CLIENT, MyConfig.CONFIG_SPEC);
-        container.registerExtensionPoint(IConfigScreenFactory.class, ConfigurationScreen::new);
-        modBus.addListener(ModConfigEvent.Loading.class, event -> {
-            if (event.getConfig().getModId().equals(MOD_ID)) {
-                SpeechRecognizer.register(
-                        MyConfig.CONFIG.priority.get(),            // get priority from config
-                        Identifier.of(MOD_ID, "my_recognizer2"),   // identifier must be unique among all mods that use mcmti
-                        MySpeechRecognizer::new
-                );
-            }
-        });
-        
-        // ...
-    }
-    
-    // ...
-}
-```
-
-> **Warning**: Do not register your custom SpeechRecognizer with duplicate `Identifier`,
-> otherwise it will conflict with other `SpeechRecognizer` instances and throw an `IllegalStateException`.
-
-### 3. Declare dependencies
-
-- Fabric version: `fabric.mod.json`
-```json
-{
-   "...": "...",
-    "depends": {
-        "mcmti": ">=3.0.0",
-         "...": "..."
-    }
-}
-```
-
-- NeoForge version: `neoforge.mods.toml`
-```toml
-# neoforge.mods.toml
-[[mods]]
-modId = "my_mod"
-# ...
-
-[[dependencies.my_mod]]
-modId = "mcmti"
-type = "required"
-versionRange = "[3.x,)"
-ordering = "AFTER"
-side = "CLIENT"
-```
-
-## Event Handling
-
-### Fabric
-
-Except mixins, the only way to handle events is registering event listeners by using [io.github.jaffe2718.mcmti.fabric.event.McmtiSpeechRecognizerEvents](fabric/src/main/java/io/github/jaffe2718/mcmti/fabric/event/McmtiSpeechRecognizerEvents.java).
-There are several events available, each with a different purpose.
-
-- `McmtiSpeechRecognizerEvents.SPEECH_RECOGNIZER_REGISTERED`:
-    Called when a new `SpeechRecognizer` is registered.
-    ```groovy
-    McmtiSpeechRecognizerEvents.SPEECH_RECOGNIZER_REGISTERED.register(
-            (/*int*/ defaultPriority, /*int*/ priority, /*SpeechRecognizer*/ recognizer) -> {
-                // ...
-            }
-    );
-    ```
-- `McmtiSpeechRecognizerEvents.SPEECH_RECOGNIZER_ACTIVATED`:
-    Called when a `SpeechRecognizer` is activated.
-    ```groovy
-    McmtiSpeechRecognizerEvents.SPEECH_RECOGNIZER_ACTIVATED.register(
-            (/*SpeechRecognizer*/ recognizer) -> {
-                // ...
-            }
-    );
-    ```
-- `McmtiSpeechRecognizerEvents.SPEECH_RECOGNIZER_DEACTIVATED`:
-    Called when a `SpeechRecognizer` is deactivated.
-    ```groovy
-    McmtiSpeechRecognizerEvents.SPEECH_RECOGNIZER_DEACTIVATED.register(
-            (/*SpeechRecognizer*/ recognizer) -> {
-                // ...
-            }
-    );
-    ```
-- `McmtiSpeechRecognizerEvents.SPEECH_RECOGNIZER_TRANSCRIBED`:
-    Called when a `SpeechRecognizer` finishes transcribing.
-    ```groovy
-    McmtiSpeechRecognizerEvents.SPEECH_RECOGNIZER_TRANSCRIBED.register(
-            (/*SpeechRecognizer*/ recognizer, /*float[]*/ audio, /*String*/ transcription) -> {
-                // ...
-            }
-    );
-    ```
-- `McmtiSpeechRecognizerEvents.ALL_SPEECH_RECOGNIZERS_DEREGISTERED`:
-    Called when all `SpeechRecognizer` instances are deregistered.
-    ```groovy
-    McmtiSpeechRecognizerEvents.ALL_SPEECH_RECOGNIZERS_DEREGISTERED.register(
-            (/*Identifier[]*/ ids) -> {
-                // ...
-            }
-    );
-    ```
-
-
-### NeoForge
-
-For NeoForge version, you can use `@SubscribeEvent` or `@EventBusSubscriber` annotation to handle events by
-listening the subclass of [SpeechRecognizerEvent](neoforge/src/main/java/io/github/jaffe2718/mcmti/neoforge/event/SpeechRecognizerEvent.java)
-
-There are some events available in package [io.github.jaffe2718.mcmti.neoforge.event](neoforge/src/main/java/io/github/jaffe2718/mcmti/neoforge/event), each with a different purpose.
-You can use `@SubscribeEvent` or `@EventBusSubscriber` annotation to register event listeners, or define the callback method yourself.
-However, you have to get the event bus by calling `MicrophoneTextInputNeoForge.getEventBus()` to register event listeners for all the ways.
-
-- `SpeechRecognizerEvent.Registered`:
-    Called when a new `SpeechRecognizer` is registered.
-    ```groovy
-    private void onRegistered(SpeechRecognizerEvent.Registered event) {
-        // ...
-    }
-  
-    // remember to use `MicrophoneTextInputNeoForge.getEventBus()` to get the event bus and register event listeners
-    MicrophoneTextInputNeoForge.getEventBus().addListener(this::onRegistered);
-    // or you can use the @SubscribeEvent or @EventBusSubscriber annotation
-    ```
-    Accessable methods:
-    - `SpeechRecognizer getRecognizer()`: get the registered recognizer.
-    - `int getDefaultPriority()`: get the default priority when registering the recognizer.
-    - `int getPriority()`: get the actual priority of the recognizer allocated by the event system.
-    <br>
-
-- `SpeechRecognizerEvent.Activated`:
-    Called when a `SpeechRecognizer` is activated.
-    ```groovy
-    private void onActivated(SpeechRecognizerEvent.Activated event) {
-        // ...
-    }
-  
-    // in other method
-    MicrophoneTextInputNeoForge.getEventBus().addListener(this::onActivated);
-    ```
-    Accessable methods:
-    - `SpeechRecognizer getRecognizer()`: get the activated recognizer.
-    <br>
-
-- `SpeechRecognizerEvent.Deactivated`:
-    Called when a `SpeechRecognizer` is deactivated.
-    ```groovy
-    private void onDeactivated(SpeechRecognizerEvent.Deactivated event) {
-        // ...
-    }
-  
-    // in other method
-    MicrophoneTextInputNeoForge.getEventBus().addListener(this::onDeactivated);
-    ```
-    Accessable methods:
-    - `SpeechRecognizer getRecognizer()`: get the deactivated recognizer.
-    <br>
-
-- `SpeechRecognizerEvent.Transcribed`:
-    Called when a `SpeechRecognizer` finishes transcribing.
-    ```groovy
-    private void onTranscribed(SpeechRecognizerEvent.Transcribed event) {
-        // ...
-    }
-  
-    // in other method
-    MicrophoneTextInputNeoForge.getEventBus().addListener(this::onTranscribed);
-    ```
-    Accessable methods:
-    - `SpeechRecognizer getRecognizer()`: get the transcribed recognizer.
-    - `float[] getAudio()`: get the audio data used for transcribing.
-    - `String getTranscription()`: get the transcribed text.
-    <br>
-
-- `SpeechRecognizerEvent.Deregistered`:
-    Called when all `SpeechRecognizer` instances are deregistered.
-    ```groovy
-    private void onDeregistered(SpeechRecognizerEvent.Deregistered event) {
-        // ...
-    }
-  
-    // in other method
-    MicrophoneTextInputNeoForge.getEventBus().addListener(this::onDeregistered);
-    ```
-    Accessable methods:
-    - `Identifier[] getIds()`: get the identifiers of the deregistered recognizers.
-    <br>
-
-
-## Tutorial: Implementing Qwen3 ASR Extension
-
-We use [Qwen3 ASR](https://central.sonatype.com/artifact/io.github.jaffe2718/qwen3asr4j) as an example and 
-[MidnightLib](https://www.midnightdust.eu/wiki/midnightlib/) as a configuration library to implement the ASR extension. 
-This tutorial will guide you through the complete implementation process based on the example in `fabric/src/test`.
-
-### 1. Project Structure
-
-First, let's look at the project structure for the Qwen3 ASR extension:
-
-```
-qwen3asr_fabric/
-├── src/
-│   ├── main/
-│   │   ├── java/io/github/jaffe2718/qwen3asr_fabric/
-│   │   │   ├── config/
-│   │   │   │   └── Qwen3ASRConfig.java            # Configuration class
-│   │   │   ├── util/
-│   │   │   │   └── Qwen3ASRSpeechRecognizer.java  # SpeechRecognizer implementation
-│   │   │   └── Qwen3ASRFabricClient.java          # Client initializer
-│   │   └── resources/
-│   │       ├── assets/qwen3asr_fabric
-│   │       │   └── icon.png
-│   │       └── fabric.mod.json                    # Fabric mod metadata
-└── build.gradle  # Build configuration
-```
-
-### 2. Configuration Management
-
-Create a configuration class to manage settings for your ASR extension. The example uses MidnightLib for configuration [Qwen3ASRConfig.java](fabric/src/test/java/io/github/jaffe2718/qwen3asr_fabric/config/Qwen3ASRConfig.java):
+Register it during client initialization, **before** the recognizer registry is
+initialized. `ClientProxy.init()` runs during `FMLPreInitializationEvent`, so a
+different mod can register from its own pre-init handler:
 
 ```java
-package io.github.jaffe2718.qwen3asr_fabric.config;
+@Mod(modid = "my_mod", name = "My Mod", version = "1.0")
+public class MyMod {
 
-// import ...;
-
-public class Qwen3ASRConfig extends MidnightConfig {
-    
-   @Override
-   public void writeChanges() {
-      super.writeChanges();
-      Thread.ofVirtual().start(SpeechRecognizer::init);  // async init
-   }
-
-   @Entry
-   public static boolean enabled = true;
-
-   @Entry
-   @Condition(requiredOption = "enabled", requiredValue = "true")
-   public static int priority = 0;
-
-   @Entry(selectionMode = JFileChooser.FILES_ONLY, fileExtensions = {"gguf"})
-   @Condition(requiredOption = "enabled", requiredValue = "true")
-   public static String modelPath = "";
-
-   @Entry
-   @Condition(requiredOption = "enabled", requiredValue = "true")
-   public static boolean customLibrary = false;
-
-   @Entry(selectionMode = JFileChooser.DIRECTORIES_ONLY)
-   @Condition(requiredOption = "enabled", requiredValue = "true")
-   @Condition(requiredOption = "customLibrary", requiredValue = "true")
-   public static String customLibraryDir = "";
-
-   @Entry(min = 1)
-   @Condition(requiredOption = "enabled", requiredValue = "true")
-   public static int maxTokens = 1024;
-
-   @Entry
-   @Condition(requiredOption = "enabled", requiredValue = "true")
-   public static String language = "";
-
-   @Entry(min = 0)
-   @Condition(requiredOption = "enabled", requiredValue = "true")
-   public static int nThreads = 4;
-
-   @Entry
-   @Condition(requiredOption = "enabled", requiredValue = "true")
-   public static boolean printProgress = true;
-
-   @Entry
-   @Condition(requiredOption = "enabled", requiredValue = "true")
-   public static boolean printTiming = false;
-
-   @Contract(value = " -> new", pure = true)
-   public static @NonNull TranscribeParams getQwenParams() {
-      return new TranscribeParams(
-              maxTokens,
-              language,
-              nThreads,
-              printProgress,
-              printTiming
-      );
-   }
-
-}
-```
-
-### 3. SpeechRecognizer Implementation
-
-Implement the `SpeechRecognizer` class with the following key methods in [Qwen3ASRSpeechRecognizer.java](fabric/src/test/java/io/github/jaffe2718/qwen3asr_fabric/util/Qwen3ASRSpeechRecognizer.java):
-
-```java
-package io.github.jaffe2718.qwen3asr_fabric.util;
-
-// import ...; 
-
-public class Qwen3ASRSpeechRecognizer extends SpeechRecognizer {
-
-   private @Nullable Qwen3ASR ctx;
-
-   @Override
-   public boolean enabled() {
-      return Qwen3ASRConfig.enabled;
-   }
-
-   @Override
-   protected @NotNull Text availableToast() {
-      return Text.literal("Qwen3 ASR is loaded!").setStyle(Style.EMPTY.withColor(0x55FF55));
-   }
-
-   @Override
-   protected @NotNull Text unavailableToast() {
-      return Text.literal("Failed to load Qwen3 ASR model!").setStyle(Style.EMPTY.withColor(0xFF5555));
-   }
-
-   @Override
-   protected boolean available() {
-      return super.available() && this.ctx != null && this.ctx.isLoaded();
-   }
-
-   @Override
-   protected void activate() throws FileNotFoundException {
-      this.deactivate();
-      this.ctx = new Qwen3ASR(Qwen3ASRConfig.modelPath, Qwen3ASRFabricClient.LOGGER);
-      try {
-         super.activate();
-      } catch (IOException ignored) {}
-   }
-   
-   @Override
-   protected void deactivate() {
-      if (this.ctx != null) {
-         this.ctx.close();
-      }
-      this.ctx = null;
-      super.deactivate();
-   }
-
-   @Override
-   public @NotNull String transcribe(float[] audio) {
-      if (this.ctx != null && this.ctx.isLoaded()) {
-         TranscribeResult result = this.ctx.transcribe(audio, Qwen3ASRConfig.getQwenParams());
-         if (result.errorMsg().isBlank()) {
-            return result.text();
-         } else {
-            Qwen3ASRFabricClient.LOGGER.error("Qwen3 ASR error: {}", result.errorMsg());
-         }
-      }
-      return "";
-   }
-
-   public static boolean loadNativeLibrary() {
-      try {
-         if (Qwen3ASRConfig.customLibrary) {
-            NativeManager.loadLibrary(Paths.get(Qwen3ASRConfig.customLibraryDir), Qwen3ASRFabricClient.LOGGER);
-         } else {
-            NativeManager.loadLibrary(Qwen3ASRFabricClient.LOGGER);
-         }
-      } catch (Exception ignored) {
-         return false;
-      }
-      GGUFModelWrapper.setGGMLGlobalLogger(Qwen3ASRFabricClient.LOGGER);
-      return true;
-   }
-}
-```
-
-### 4. Client Initialization and Registration
-
-Register your custom `SpeechRecognizer` in the client initializer [Qwen3ASRFabricClient.java](fabric/src/test/java/io/github/jaffe2718/qwen3asr_fabric/Qwen3ASRFabricClient.java):
-
-```java
-package io.github.jaffe2718.qwen3asr_fabric;
-
-// import ...;
-
-public class Qwen3ASRFabricClient implements ClientModInitializer {
-
-   public static final String MOD_ID = "qwen3asr_fabric";
-   public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
-
-   @Override
-   public void onInitializeClient() {
-      MidnightConfig.init(MOD_ID, Qwen3ASRConfig.class);
-      if (Qwen3ASRSpeechRecognizer.loadNativeLibrary()) {
-         SpeechRecognizer.register(Qwen3ASRConfig.priority, Identifier.of(MOD_ID, "qwen3asr"), Qwen3ASRSpeechRecognizer::new);
-      }
-   }
-}
-```
-
-### 5. Dependency Declaration
-
-Add the necessary dependencies in your [fabric.mod.json](fabric/src/test/resources/fabric.mod.json):
-
-```json
-{
-    "schemaVersion": 1,
-    "id": "qwen3asr_fabric",
-    "version": "0.0.1-alpha",
-    "name": "Qwen3 ASR",
-    "description": "Qwen3 ASR extension for Microphone Text Input.",
-    "environment": "client",
-    "entrypoints": {
-        "client": [
-            "io.github.jaffe2718.qwen3asr_fabric.Qwen3ASRFabricClient"
-        ]
-    },
-    "depends": {
-        "fabricloader": ">=0.15.0",
-        "minecraft": "*",
-        "midnightlib": "*",
-        "mcmti": ">=3.0.0"
-    },
-   "...": "..."
-}
-```
-
-### 6. Build Configuration
-
-Add the necessary dependencies in your `build.gradle` file:
-
-```groovy
-repositories {
-    // ...
-    maven {
-        url = "https://api.modrinth.com/maven"
+    @Mod.EventHandler
+    public void preInit(FMLPreInitializationEvent event) {
+        if (FMLCommonHandler.instance().getSide() == Side.CLIENT) {
+            SpeechRecognizer.register(
+                1,                                    // priority, smaller = higher
+                new ResourceLocation("my_mod", "my_engine"),
+                MyRecognizer::new);
+        }
     }
-    // Add any other repositories needed for your ASR library
-}
-
-dependencies {
-    modImplementation "maven.modrinth:mcmti:${project.mcmti_3_x}"
-    modImplementation "eu.midnightdust:midnightlib:${project.midnightlib_version}"
-    // Add your ASR library dependencies
-    // Add your ASR library dependencies
-    // implementation include "your.asr.library:version"
-    // ...
 }
 ```
 
-### 7. Best Practices
+Notes:
 
-1. **Error Handling**: Always include proper error handling in your `transcribe` method to ensure the mod doesn't crash if the ASR service fails.
+- Registering a recognizer does not activate it. `SpeechRecognizer.init()` (run\n  asynchronously by `ClientProxy`) activates the first enabled one.
+- After changing the config, call `SpeechRecognizer.reloadAsync()` to rebuild
+  the active recognizer.
+- The `id` must be unique across all mods. A duplicate throws
+  `IllegalStateException`.
+- `SpeechRecognizer.recognize(float[])` applies the optional encoding repair
+  from the config, so implementations should return raw UTF-8 text.
+- `transcribe` is called on the ASR thread, never on the client thread. Do not
+  call Minecraft APIs from it.
 
-2. **Resource Management**: Implement `deactivate()` properly to release resources when they're not needed, which helps save memory.
+## Chat delivery details
 
-3. **Configuration Reloading**: Add a mechanism to reload the SpeechRecognizer when configuration changes, as shown in the `Qwen3ASRConfig.writeChanges()` method.
+`ClientEventHandler` implements the three modes:
 
-4. **Logging**: Use a logger to record important events and errors, which helps with debugging.
+- `RELEASE_KEY_TO_SEND`: sends `prefix + text`, splitting at
+  `min(maxMessageLength, 100)` characters (the vanilla 1.7.10 limit).
+- `RELEASE_KEY_TO_INPUT`: opens `new GuiChat(prefix + text)` on the client
+  thread; the text is a draft and is not sent automatically.
+- `AUTO_SEND`: records `recordCycleMs` cycles and sends every non-empty result.
 
-5. **User Feedback**: Provide clear toast messages to inform users about the status of your ASR extension.
+Status messages use `GuiIngame.func_110326_a(text, true)`, the action-bar
+overlay used by 1.7.10 for "Now playing" messages.
 
-### 8. Testing Your Extension
+## Testing checklist
 
-1. **Model Preparation**: Download the required model files (e.g., Qwen3 ASR GGUF model) and configure the model path in your mod's settings.
-
-2. **Testing Workflow**:
-   - Start Minecraft with your mod installed
-   - Open the mod settings and ensure your ASR extension is enabled
-   - Configure the model path and other settings
-   - Use the microphone input feature to test speech recognition
-   - Check the logs for any errors or warnings
-
-3. **Troubleshooting**:
-   - Ensure the native library is loaded correctly
-   - Verify the model path is set correctly
-   - Check the logs for any error messages
-   - Ensure your mod has the necessary permissions to access the microphone
-
-By following this tutorial and the example code, you can successfully implement your own ASR extension for the Microphone Text Input mod.
-
-
-
-> **Note**: another example is [VoskNeoForge](neoforge/src/test/java/io/github/jaffe2718/vosk_neoforge/VoskNeoForge.java)
+1. `./gradlew build` produces `build/libs/mcmti-3.1.0.jar` (~112 MB, contains
+   `org/vosk`, `com/sun/jna`, `win32-x86-64/libvosk.dll` and the two model
+   zips).
+2. Start a dev client (`./gradlew runClient`, or add the jar to a GTNH 2.9.0
+   instance). The log must show:
+   ```
+   [mcmti-asr/INFO] Speech model vosk-model-small-... extracted (...)
+   [mcmti-asr/INFO] Vosk model loaded from .../config/mcmti/models/...
+   ```
+3. Enter a world, press `V`, speak and release. The text appears in chat (or in
+   the chat draft in `RELEASE_KEY_TO_INPUT` mode).
+4. Open **Mods �?Microphone Text Input �?Config**, change the language, press
+   *Save and reload model*; the log should show the other model being loaded.
+5. Remove `config/mcmti/models` and verify the model is extracted again on the
+   next start.

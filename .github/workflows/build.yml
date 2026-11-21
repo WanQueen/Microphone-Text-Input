@@ -1,0 +1,39 @@
+name: Build
+
+on:
+    workflow_dispatch:
+    push:
+        branches:
+            - Forge-1.7.10
+    pull_request:
+        branches:
+            - Forge-1.7.10
+
+jobs:
+    build:
+        name: Build 1.7.10 jar
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v4
+
+            -   name: Setup JDK 17
+                uses: actions/setup-java@v4
+                with:
+                    java-version: '17'
+                    distribution: 'temurin'
+
+            -   name: Grant execute permission for gradlew
+                run: chmod +x gradlew
+
+            -   name: Build
+                run: ./gradlew build --no-daemon
+
+            -   name: Upload jar
+                uses: actions/upload-artifact@v4
+                with:
+                    name: mcmti-1.7.10
+                    path: build/libs/mcmti-*.jar
+                    if-no-files-found: error

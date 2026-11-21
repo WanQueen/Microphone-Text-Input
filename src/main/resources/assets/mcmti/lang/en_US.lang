@@ -1,0 +1,33 @@
+key.categories.mcmti=Microphone Text Input
+key.mcmti.recognize=Recognize
+
+message.mcmti.audioInputDeviceLoadFailed=§cAudio input device load failed
+message.mcmti.recognizing=§eRecognizing...
+message.mcmti.recordingAudio=§eRecording audio...
+message.mcmti.messageSent=§aMessage sent
+message.mcmti.noRecognizerAvailable=§cNo speech recognizer available
+message.mcmti.recognizerAvailable=§aSpeech recognizer ready
+message.mcmti.modelLoading=§eLoading speech model...
+message.mcmti.modelLoaded=§aSpeech model loaded
+message.mcmti.modelLoadFailed=§cSpeech model load failed
+
+mcmti.config.title=Microphone Text Input
+mcmti.config.mode=Mode
+mcmti.config.modeValue=%s
+mcmti.config.language=Language
+mcmti.config.languageValue=%s
+mcmti.config.prefix=Message prefix
+mcmti.config.reload=Save and reload model
+mcmti.config.status=Status: %s
+mcmti.config.status.loading=§eloading
+mcmti.config.status.ready=§aready
+mcmti.config.status.unavailable=§cunavailable
+mcmti.config.status.none=§cnot registered
+
+mcmti.mode.AUTO_SEND=Auto send
+mcmti.mode.RELEASE_KEY_TO_SEND=Release to send
+mcmti.mode.RELEASE_KEY_TO_INPUT=Release to draft
+
+mcmti.language.auto=Auto (system)
+mcmti.language.zh=Chinese
+mcmti.language.en=English
